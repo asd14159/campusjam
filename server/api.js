@@ -7,6 +7,10 @@ const learningState = {
   interactions: new Map(),
   recommendations: new Set(),
 }
+const learningThresholds = {
+  minimumInteractions: 1,
+  minimumSeconds: 2,
+}
 
 function getAzureConfig() {
   const endpoint = process.env.AZURE_OPENAI_ENDPOINT?.replace(/\/$/, '')
@@ -18,7 +22,7 @@ function getAzureConfig() {
   return { endpoint, apiKey, deployment }
 }
 
-async function analyzeSimilarEmails(focusEmail, candidates) {
+async function analyzeSimilarEmails(focusEmail, candidates, interaction) {
   const { endpoint, apiKey, deployment } = getAzureConfig()
   const response = await fetch(`${endpoint}/responses`, {
     method: 'POST',
@@ -32,6 +36,7 @@ async function analyzeSimilarEmails(focusEmail, candidates) {
         'Find emails similar in topic and purpose to the focus email.',
         'Return only JSON in the form {"emailIds":["id1","id2"]}.',
         'Do not include the focus email itself.',
+        `Interaction evidence: viewed ${interaction.count} time(s) for ${interaction.seconds} second(s). Treat this as an early interest signal when ranking related emails.`,
         `Focus email: ${JSON.stringify(focusEmail)}`,
         `Candidate emails: ${JSON.stringify(candidates)}`,
       ].join('\n'),
@@ -69,11 +74,16 @@ api.post('/mail-learning', async (request, response) => {
     seconds: previous.seconds + Math.round(durationSeconds),
   }
   learningState.interactions.set(focusEmail.id, interaction)
+  const learningReady = interaction.count >= learningThresholds.minimumInteractions || interaction.seconds >= learningThresholds.minimumSeconds
+
+  if (!learningReady) {
+    return response.json({ interaction, learningReady: false, recommendedIds: [...learningState.recommendations] })
+  }
 
   try {
-    const recommendedIds = await analyzeSimilarEmails(focusEmail, candidates)
+    const recommendedIds = await analyzeSimilarEmails(focusEmail, candidates, interaction)
     recommendedIds.forEach((id) => learningState.recommendations.add(id))
-    return response.json({ interaction, recommendedIds: [...learningState.recommendations] })
+    return response.json({ interaction, learningReady: true, recommendedIds: [...learningState.recommendations] })
   } catch (error) {
     console.error(error)
     return response.status(502).json({ error: 'AI learning failed' })
